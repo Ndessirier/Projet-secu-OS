@@ -431,52 +431,7 @@ void surveiller_arborescence(const char *chemin) {
     free(wd);
 }
 
-// Fonction pour afficher les autorisations d'accès pour les chemins de fichiers spécifiés dans le JSON
-void afficher_autorisations_acces(const char *chemin) {
-    // Ouvrir le fichier JSON en lecture
-    FILE *fichier_json = fopen(JSON_FILE_PATH, "r");
-    if (!fichier_json) {
-        printf("Erreur : Impossible d'ouvrir le fichier JSON.\n");
-        return;
-    }
 
-    // Lire le contenu du fichier JSON
-    fseek(fichier_json, 0, SEEK_END);
-    long taille_fichier = ftell(fichier_json);
-    fseek(fichier_json, 0, SEEK_SET);
-    char *contenu_json = (char *)malloc(taille_fichier + 1);
-    fread(contenu_json, 1, taille_fichier, fichier_json);
-    fclose(fichier_json);
-    contenu_json[taille_fichier] = '\0';
-
-    // Parser le contenu JSON
-    cJSON *json = cJSON_Parse(contenu_json);
-    free(contenu_json);
-    if (!json) {
-        printf("Erreur : Impossible de parser le fichier JSON.\n");
-        return;
-    }
-
-    // Vérifier si le champ "files" existe
-    cJSON *files = cJSON_GetObjectItemCaseSensitive(json, "files");
-    if (!cJSON_IsArray(files)) {
-        printf("Erreur : Le champ 'files' n'est pas un tableau dans le JSON.\n");
-        cJSON_Delete(json);
-        return;
-    }
-
-    // Parcourir le tableau de chemins de fichiers
-    cJSON *chemin_element;
-    cJSON_ArrayForEach(chemin_element, files) {
-    // Vérifier si le chemin est une chaîne de caractères
-        if (cJSON_IsString(chemin_element)) {
-            printf("Chemin : %s\n", chemin_element->valuestring);
-    }
-}
-
-    // Libérer la mémoire allouée pour le JSON
-    cJSON_Delete(json);
-}
 
 
 int main(int argc, char *argv[]) {
@@ -506,11 +461,6 @@ int main(int argc, char *argv[]) {
         // Activer la surveillance d'arborescence
         surveiller_arborescence(".");
     // Vérifier si l'option "acces" a été spécifiée
-    } else if (argc != 2 || strcmp(argv[1], "acces") != 0) {
-        printf("Utilisation : %s acces\n", argv[0]);
-        return 1;
-    // Appeler la fonction pour afficher les autorisations d'accès
-        afficher_autorisations_acces(".");
     } else {
         printf("Commande non reconnue.\n");
         return 1;
