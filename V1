@@ -10,12 +10,19 @@
 #include <limits.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pwd.h>
+#include <grp.h>
 
 #define EVENT_SIZE  (sizeof(struct inotify_event))
 #define BUF_LEN     (2048 * (EVENT_SIZE + 16))
+#define JSON_FILE_PATH2 "/usr/share/secu_os/Fichier_sensible" // Chemin vers le fichier JSON
 #define JSON_FILE_PATH "/usr/share/secu_os/bibliotheque_app.json"
 #define LOG_FILE_PATH "/usr/share/secu_os/log_surveillance.txt"
 #define LOG_DIRECTORY "/usr/share/secu_os/"
+#define MAX_FILES 100
+#define MAX_FILENAME_LEN 256
+#define MAX_USERNAME_LEN 32
+
 
 // Fonction pour créer le répertoire secu_os s'il n'existe pas
 void createSecuOsDirectory() {
@@ -39,6 +46,50 @@ void createSecuOsDirectory() {
     }
 }
 
+void createJsonFichier_sensible() {
+    // Vérifier si le fichier JSON existe déjà
+    struct stat st;
+    if (stat(JSON_FILE_PATH2, &st) == 0) {
+        if (S_ISREG(st.st_mode)) {
+            printf("Le fichier JSON existe déjà.\n");
+            return;
+        }
+    }
+
+    // Le fichier JSON n'existe pas, donc nous le créons
+    printf("Le fichier JSON n'existe pas. Création du fichier...\n");
+
+    // Créer un objet JSON vide avec un tableau "files"
+    cJSON *root = cJSON_CreateObject();
+    cJSON *filesArray = cJSON_CreateArray();
+    cJSON_AddItemToObject(root, "files", filesArray);
+
+    // Ouvrir le fichier JSON en mode écriture
+    FILE *file = fopen(JSON_FILE_PATH2, "w");
+    if (!file) {
+        cJSON_Delete(root);
+        perror("Erreur lors de l'ouverture du fichier JSON en mode écriture");
+        return;
+    }
+
+    // Écrire le JSON dans le fichier
+    char *jsonStr = cJSON_Print(root);
+    if (!jsonStr) {
+        cJSON_Delete(root);
+        fclose(file);
+        printf("Erreur : Impossible d'écrire le JSON dans le fichier.\n");
+        return;
+    }
+    fprintf(file, "%s\n", jsonStr);
+    free(jsonStr);
+    fclose(file);
+
+    printf("Fichier JSON créé avec succès.\n");
+
+    // Libérer la mémoire allouée pour le JSON
+    cJSON_Delete(root);
+}
+
 // Fonction pour créer le fichier JSON s'il n'existe pas
 void createJsonFileIfNeeded() {
     // Vérifier si le fichier JSON existe déjà
@@ -59,7 +110,7 @@ void createJsonFileIfNeeded() {
     cJSON_AddItemToObject(root, "files", filesArray);
 
     // Ouvrir le fichier JSON en mode écriture
-    FILE *file = fopen(JSON_FILE_PATH, "w");
+    FILE *file = fopen(JSON_FILE_PATH2, "w");
     if (!file) {
         cJSON_Delete(root);
         perror("Erreur lors de l'ouverture du fichier JSON en mode écriture");
@@ -103,10 +154,10 @@ void creer_log_surveillance() {
 
     printf("Fichier de journalisation créé avec succès.\n");
 }
-// Fonction pour ajouter un chemin de fichier dans le JSON
-void addFilePathToJson(const char *newFilePath) {
+
+void addFilePathToJsonFichier_sensible(const char *newFilePath, const char *jsonFilePath) {
     // Ouvrir le fichier JSON
-    FILE *file = fopen(JSON_FILE_PATH, "r");
+    FILE *file = fopen(jsonFilePath, "r");
     if (!file) {
         perror("Erreur lors de l'ouverture du fichier JSON");
         return;
@@ -159,7 +210,7 @@ void addFilePathToJson(const char *newFilePath) {
     cJSON_AddItemToArray(filesArray, newFileJson);
 
     // Ouvrir à nouveau le fichier JSON en mode écriture pour écrire le JSON modifié
-    file = fopen(JSON_FILE_PATH, "w");
+    file = fopen(jsonFilePath, "w");
     if (!file) {
         cJSON_Delete(root);
         perror("Erreur lors de l'ouverture du fichier JSON en mode écriture");
@@ -191,10 +242,96 @@ void addFilePathToJson(const char *newFilePath) {
     cJSON_Delete(root);
 }
 
-// Fonction pour supprimer un chemin de fichier du JSON
-void removeFilePathFromJson(const char *filePathToRemove) {
+void removeFilePathFromJsonFichier_sensible(const char *filePathToRemove) {
     // Ouvrir le fichier JSON
-    FILE *file = fopen(JSON_FILE_PATH, "r");
+    FILE *file = fopen(JSON_FILE_PATH2, "r+");
+    if (!file) {
+        perror("Erreur lors de l'ouverture du fichier JSON");
+        return;
+    }
+
+    // Charger le JSON depuis le fichier
+    fseek(file, 0, SEEK_END);
+    long fileSize = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    char *jsonBuffer = (char *)malloc(fileSize + 1);
+    if (!jsonBuffer) {
+        fclose(file);
+        printf("Erreur : Impossible d'allouer de la mémoire pour lire le JSON.\n");
+        return;
+    }
+    size_t bytesRead = fread(jsonBuffer, 1, fileSize, file);
+    if (bytesRead != fileSize) {
+        free(jsonBuffer);
+        fclose(file);
+        printf("Erreur : Impossible de lire le contenu du fichier JSON.\n");
+        return;
+    }
+    jsonBuffer[fileSize] = '\0';
+
+    // Analyser le JSON
+    cJSON *root = cJSON_Parse(jsonBuffer);
+    if (!root) {
+        printf("Erreur : Impossible de parser le JSON.\n");
+        fclose(file);
+        free(jsonBuffer);
+        return;
+    }
+
+    // Récupérer le tableau "files" du JSON
+    cJSON *filesArray = cJSON_GetObjectItem(root, "files");
+    if (!filesArray || !cJSON_IsArray(filesArray)) {
+        cJSON_Delete(root);
+        fclose(file);
+        free(jsonBuffer);
+        printf("Erreur : Le JSON ne contient pas de tableau de fichiers.\n");
+        return;
+    }
+
+    // Parcourir le tableau "files" à l'envers pour supprimer le chemin de fichier spécifié
+    int arraySize = cJSON_GetArraySize(filesArray);
+    int foundIndex = -1;
+    for (int i = arraySize - 1; i >= 0; i--) {
+        cJSON *fileItem = cJSON_GetArrayItem(filesArray, i);
+        if (cJSON_IsString(fileItem) && strcmp(cJSON_GetStringValue(fileItem), filePathToRemove) == 0) {
+            foundIndex = i;
+            break;
+        }
+    }
+
+    if (foundIndex != -1) {
+        cJSON_DeleteItemFromArray(filesArray, foundIndex);
+
+        // Écrire le JSON modifié dans le fichier
+        fseek(file, 0, SEEK_SET);
+        char *jsonStr = cJSON_Print(root);
+        if (!jsonStr) {
+            cJSON_Delete(root);
+            fclose(file);
+            free(jsonBuffer);
+            printf("Erreur : Impossible d'écrire le JSON modifié dans le fichier.\n");
+            return;
+        }
+        fputs(jsonStr, file);
+        free(jsonStr);
+
+        printf("Le chemin de fichier a été supprimé avec succès du JSON.\n");
+    } else {
+        // Si le chemin de fichier n'a pas été trouvé dans le JSON
+        printf("Le chemin de fichier spécifié n'a pas été trouvé dans le JSON.\n");
+    }
+
+    // Libérer la mémoire allouée pour le JSON
+    cJSON_Delete(root);
+    fclose(file);
+    free(jsonBuffer);
+}
+
+
+// Fonction pour ajouter un chemin de fichier dans le JSON
+void addFilePathToJson(const char *newFilePath, const char *jsonFilePath) {
+    // Ouvrir le fichier JSON
+    FILE *file = fopen(jsonFilePath, "r");
     if (!file) {
         perror("Erreur lors de l'ouverture du fichier JSON");
         return;
@@ -235,45 +372,133 @@ void removeFilePathFromJson(const char *filePathToRemove) {
         return;
     }
 
-    // Parcourir le tableau "files" et supprimer le chemin de fichier spécifié
+    // Créer un nouvel objet JSON pour le chemin de fichier
+    cJSON *newFileJson = cJSON_CreateString(newFilePath);
+    if (!newFileJson) {
+        cJSON_Delete(root);
+        printf("Erreur : Impossible de créer l'objet JSON pour le nouveau chemin de fichier.\n");
+        return;
+    }
+
+    // Ajouter le nouvel objet JSON dans le tableau "files"
+    cJSON_AddItemToArray(filesArray, newFileJson);
+
+    // Ouvrir à nouveau le fichier JSON en mode écriture pour écrire le JSON modifié
+    file = fopen(jsonFilePath, "w");
+    if (!file) {
+        cJSON_Delete(root);
+        perror("Erreur lors de l'ouverture du fichier JSON en mode écriture");
+        return;
+    }
+
+    // Écrire le JSON modifié dans le fichier
+    char *jsonStr = cJSON_Print(root);
+    if (!jsonStr) {
+        cJSON_Delete(root);
+        fclose(file);
+        printf("Erreur : Impossible d'écrire le JSON modifié dans le fichier.\n");
+        return;
+    }
+
+    // Écrire chaque chemin sur une nouvelle ligne pour une meilleure lisibilité
+    char *token = strtok(jsonStr, "\n");
+    while (token != NULL) {
+        fprintf(file, "%s\n", token);
+        token = strtok(NULL, "\n");
+    }
+
+    free(jsonStr);
+    fclose(file);
+
+    printf("Le chemin de fichier a été ajouté avec succès dans le JSON.\n");
+
+    // Libérer la mémoire allouée pour le JSON
+    cJSON_Delete(root);
+}
+
+void removeFilePathFromJson(const char *filePathToRemove, const char *jsonFilePath) {
+    // Ouvrir le fichier JSON
+    FILE *file = fopen(jsonFilePath, "r+");
+    if (!file) {
+        perror("Erreur lors de l'ouverture du fichier JSON");
+        return;
+    }
+
+    // Charger le JSON depuis le fichier
+    fseek(file, 0, SEEK_END);
+    long fileSize = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    char *jsonBuffer = (char *)malloc(fileSize + 1);
+    if (!jsonBuffer) {
+        fclose(file);
+        printf("Erreur : Impossible d'allouer de la mémoire pour lire le JSON.\n");
+        return;
+    }
+    size_t bytesRead = fread(jsonBuffer, 1, fileSize, file);
+    if (bytesRead != fileSize) {
+        free(jsonBuffer);
+        fclose(file);
+        printf("Erreur : Impossible de lire le contenu du fichier JSON.\n");
+        return;
+    }
+    jsonBuffer[fileSize] = '\0';
+
+    // Analyser le JSON
+    cJSON *root = cJSON_Parse(jsonBuffer);
+    if (!root) {
+        printf("Erreur : Impossible de parser le JSON.\n");
+        fclose(file);
+        free(jsonBuffer);
+        return;
+    }
+
+    // Récupérer le tableau "files" du JSON
+    cJSON *filesArray = cJSON_GetObjectItem(root, "files");
+    if (!filesArray || !cJSON_IsArray(filesArray)) {
+        cJSON_Delete(root);
+        fclose(file);
+        free(jsonBuffer);
+        printf("Erreur : Le JSON ne contient pas de tableau de fichiers.\n");
+        return;
+    }
+
+    // Marquer les indices des chemins de fichiers à supprimer
+    int indicesToRemove[100]; // Suppose une limite de 100 chemins de fichiers à supprimer
+    int numToRemove = 0;
     int arraySize = cJSON_GetArraySize(filesArray);
     for (int i = 0; i < arraySize; i++) {
         cJSON *fileItem = cJSON_GetArrayItem(filesArray, i);
         if (cJSON_IsString(fileItem) && strcmp(cJSON_GetStringValue(fileItem), filePathToRemove) == 0) {
-            cJSON_DeleteItemFromArray(filesArray, i);
-
-            // Ouvrir à nouveau le fichier JSON en mode écriture pour écrire le JSON modifié
-            file = fopen(JSON_FILE_PATH, "w");
-            if (!file) {
-                cJSON_Delete(root);
-                perror("Erreur lors de l'ouverture du fichier JSON en mode écriture");
-                return;
-            }
-
-            // Écrire le JSON modifié dans le fichier
-            char *jsonStr = cJSON_Print(root);
-            if (!jsonStr) {
-                cJSON_Delete(root);
-                fclose(file);
-                printf("Erreur : Impossible d'écrire le JSON modifié dans le fichier.\n");
-                return;
-            }
-            fprintf(file, "%s\n", jsonStr);
-            free(jsonStr);
-            fclose(file);
-
-            printf("Le chemin de fichier a été supprimé avec succès du JSON.\n");
-
-            // Libérer la mémoire allouée pour le JSON
-            cJSON_Delete(root);
-            return;
+            indicesToRemove[numToRemove++] = i;
         }
     }
 
-    // Si le chemin de fichier n'a pas été trouvé dans le JSON
+    // Supprimer les chemins de fichiers marqués
+    for (int i = numToRemove - 1; i >= 0; i--) {
+        cJSON_DeleteItemFromArray(filesArray, indicesToRemove[i]);
+    }
+
+    // Écrire le JSON modifié dans le fichier
+    fseek(file, 0, SEEK_SET);
+    char *jsonStr = cJSON_Print(root);
+    if (!jsonStr) {
+        cJSON_Delete(root);
+        fclose(file);
+        free(jsonBuffer);
+        printf("Erreur : Impossible d'écrire le JSON modifié dans le fichier.\n");
+        return;
+    }
+    fputs(jsonStr, file);
+    free(jsonStr);
+    fclose(file);
+
+    printf("Les chemins de fichier ont été supprimés avec succès du JSON.\n");
+
+    // Libérer la mémoire allouée pour le JSON
     cJSON_Delete(root);
-    printf("Le chemin de fichier spécifié n'a pas été trouvé dans le JSON.\n");
+    free(jsonBuffer);
 }
+
 
 void surveiller_arborescence(const char *chemin) {
     int fd;
@@ -431,40 +656,515 @@ void surveiller_arborescence(const char *chemin) {
     free(wd);
 }
 
+// Structure représentant une autorisation d'accès à un fichier
+typedef struct {
+    char path[256];
+    int read_permission;
+    int write_permission;
+    struct stat file_stat; // Structure pour stocker les informations sur le fichier
+} FileAccessPermission;
 
+// Vérifie si un utilisateur existe sur la machine Unix/Linux
+int userExists(const char *username) {
+    struct passwd *pw;
+    pw = getpwnam(username);
+    return (pw != NULL);
+}
 
+// Vérifie les autorisations d'accès pour un utilisateur spécifique
+int checkPermissionsForUser(const char *path, uid_t uid, mode_t mode) {
+    struct stat file_stat;
+    if (stat(path, &file_stat) == -1) {
+        printf("Impossible d'obtenir les informations détaillées sur le fichier %s.\n", path);
+        return 0; // Échec
+    }
 
-int main(int argc, char *argv[]) {
-    // Vérifier le nombre d'arguments
-    if (argc < 2) {
-        printf("Utilisation : %s <commande> [<chemin>]\n", argv[0]);
+    // Vérifie si l'utilisateur est root
+    if (uid == 0) {
+        // L'utilisateur root a toujours toutes les autorisations
         return 1;
     }
 
+    // Vérifie si l'utilisateur est le propriétaire du fichier
+    if (file_stat.st_uid == uid) {
+        // Vérifie les autorisations
+        if ((mode & S_IRUSR) && (file_stat.st_mode & S_IRUSR))
+            return 1; // L'utilisateur a la permission de lecture
+        if ((mode & S_IWUSR) && (file_stat.st_mode & S_IWUSR))
+            return 1; // L'utilisateur a la permission d'écriture
+    }
+
+    // Vérifie si l'utilisateur appartient au groupe du fichier
+    if (file_stat.st_gid == getgid()) {
+        // Vérifie les autorisations
+        if ((mode & S_IRGRP) && (file_stat.st_mode & S_IRGRP))
+            return 1; // L'utilisateur a la permission de lecture
+        if ((mode & S_IWGRP) && (file_stat.st_mode & S_IWGRP))
+            return 1; // L'utilisateur a la permission d'écriture
+    }
+
+    // Vérifie les autorisations pour les autres utilisateurs
+    if ((mode & S_IROTH) && (file_stat.st_mode & S_IROTH))
+        return 1; // L'utilisateur a la permission de lecture
+    if ((mode & S_IWOTH) && (file_stat.st_mode & S_IWOTH))
+        return 1; // L'utilisateur a la permission d'écriture
+
+    // L'utilisateur n'a pas les autorisations appropriées
+    return 0;
+}
+
+// Lit les autorisations d'accès aux fichiers depuis un fichier JSON
+FileAccessPermission* readPermissionsFromJSON(const char *filename, const char *username, int *num_files) {
+    if (!userExists(username)) {
+        printf("Utilisateur non trouvé.\n");
+        return NULL;
+    }
+
+    // Lecture du fichier JSON
+    printf("Lecture du fichier JSON : %s\n", filename);
+    FILE *file = fopen(filename, "r");
+    if (!file) {
+        printf("Impossible d'ouvrir le fichier JSON.\n");
+        return NULL;
+    }
+
+    // Obtention de la taille du fichier
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    rewind(file);
+
+    // Lecture du contenu du fichier JSON dans une chaîne
+    printf("Lecture du contenu du fichier JSON...\n");
+    char *json_buffer = (char*)malloc(file_size + 1);
+    fread(json_buffer, 1, file_size, file);
+    fclose(file);
+
+    // Terminaison de la chaîne avec un caractère nul
+    json_buffer[file_size] = '\0';
+    printf("Contenu JSON lu : %s\n", json_buffer);
+
+    // Parsing du JSON
+    printf("Parsing du JSON...\n");
+    cJSON *json = cJSON_Parse(json_buffer);
+    if (!json) {
+        printf("Erreur de parsing JSON.\n");
+        free(json_buffer);
+        return NULL;
+    }
+
+    // Récupération du tableau de fichiers
+    printf("Récupération du tableau de fichiers...\n");
+    cJSON *files_array = cJSON_GetObjectItem(json, "files");
+    if (!files_array || !cJSON_IsArray(files_array)) {
+        printf("Le fichier JSON ne contient pas de tableau de fichiers.\n");
+        cJSON_Delete(json);
+        free(json_buffer);
+        return NULL;
+    }
+
+    // Allocation de mémoire pour stocker les autorisations d'accès à chaque fichier
+    int count = cJSON_GetArraySize(files_array);
+    printf("Nombre de fichiers dans le tableau : %d\n", count);
+    FileAccessPermission *file_permissions = malloc(count * sizeof(FileAccessPermission));
+
+    // Obtenez l'UID de l'utilisateur spécifié
+    struct passwd *pw = getpwnam(username);
+    if (!pw) {
+        printf("Utilisateur non trouvé.\n");
+        cJSON_Delete(json);
+        free(json_buffer);
+        return NULL;
+    }
+    uid_t uid = pw->pw_uid;
+
+    // Parcours du tableau de fichiers et récupération des chemins des fichiers
+    for (int i = 0; i < count; i++) {
+        cJSON *path_item = cJSON_GetArrayItem(files_array, i);
+        if (!cJSON_IsString(path_item)) {
+            printf("Erreur lors de la lecture du chemin du fichier %d.\n", i+1);
+            continue;
+        }
+
+        // Copie du chemin du fichier dans la structure
+        strcpy(file_permissions[i].path, path_item->valuestring);
+
+        // Vérifier les autorisations de lecture pour l'utilisateur spécifié
+        file_permissions[i].read_permission = checkPermissionsForUser(file_permissions[i].path, uid, R_OK);
+
+        // Vérifier les autorisations d'écriture pour l'utilisateur spécifié
+        file_permissions[i].write_permission = checkPermissionsForUser(file_permissions[i].path, uid, W_OK);
+
+        // Obtenir les informations détaillées sur le fichier
+        if (stat(file_permissions[i].path, &(file_permissions[i].file_stat)) == -1) {
+            printf("Impossible d'obtenir les informations détaillées sur le fichier %s.\n", file_permissions[i].path);
+        }
+    }
+
+    // Libération de la mémoire
+    cJSON_Delete(json);
+    free(json_buffer);
+
+    *num_files = count;
+    return file_permissions;
+}
+
+// Affiche les informations détaillées sur chaque fichier
+void displayDetailedFileInformation(const char *username, FileAccessPermission *file_permissions, int num_files) {
+    printf("Informations détaillées sur les fichiers pour l'utilisateur : %s\n", username);
+    for (int i = 0; i < num_files; i++) {
+        printf("Fichier : %s\n", file_permissions[i].path);
+
+        // Vérification des autorisations de lecture et écriture
+        printf("Lecture : %s\n", file_permissions[i].read_permission ? "Oui" : "Non");
+        printf("Ecriture : %s\n", file_permissions[i].write_permission ? "Oui" : "Non");
+
+        // Affichage des informations détaillées sur le fichier
+        printf("Informations détaillées :\n");
+        printf("Taille : %ld octets\n", file_permissions[i].file_stat.st_size);
+        printf("Propriétaire : %d\n", file_permissions[i].file_stat.st_uid);
+        printf("Groupe : %d\n", file_permissions[i].file_stat.st_gid);
+        printf("Permissions : %o\n", file_permissions[i].file_stat.st_mode & 0777);
+        // Vous pouvez ajouter plus d'informations ici en utilisant d'autres champs de la structure stat
+
+        printf("\n");
+    }
+}
+
+// Change les autorisations d'un fichier pour un utilisateur spécifique
+void changeFilePermissions(const char *filename, const char *username) {
+    char permission[10];
+    printf("Entrez les nouvelles autorisations (par exemple, 'rw') : ");
+    scanf("%s", permission);
+
+    mode_t new_mode = 0;
+    if (strchr(permission, 'r'))
+        new_mode |= S_IRUSR | S_IRGRP | S_IROTH;
+    if (strchr(permission, 'w'))
+        new_mode |= S_IWUSR | S_IWGRP | S_IWOTH;
+
+    // Change les autorisations du fichier
+    if (chmod(filename, new_mode) == -1) {
+        printf("Erreur lors du changement des autorisations du fichier %s.\n", filename);
+        return;
+    }
+
+    printf("Les autorisations du fichier %s ont été modifiées avec succès.\n", filename);
+}
+
+void restrictPermissions(const char *filename) {
+    // Affichage du fichier avant la modification
+    printf("Fichier avant modification des permissions : %s\n", filename);
+
+    // Récupération des permissions actuelles
+    struct stat file_stat;
+    if (stat(filename, &file_stat) != 0) {
+        perror("Erreur en récupérant les permissions du fichier");
+        return;
+    }
+
+    // Restreindre les permissions pour la lecture, l'écriture et l'exécution pour tout le monde sauf le groupe "sensible"
+    if (chmod(filename, S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IWGRP | S_IXGRP) != 0) {
+        perror("Erreur en changeant les permissions du fichier");
+        return;
+    }
+
+    // Accorder les permissions au groupe "sensible"
+    if (chmod(filename, S_IRGRP | S_IWGRP | S_IXGRP) != 0) {
+        perror("Erreur en changeant les permissions du fichier");
+        return;
+    }
+
+    // Affichage du fichier après la modification
+    printf("Fichier après modification des permissions : %s\n", filename);
+}
+
+void retrieveFilesAndRestrictPermissions() {
+    FILE *file = fopen(JSON_FILE_PATH2, "r");
+    if (file == NULL) {
+        perror("Erreur en ouvrant le fichier JSON");
+        return;
+    }
+
+    char files[MAX_FILES][MAX_FILENAME_LEN];
+    int num_files = 0;
+
+    // Analyser le fichier JSON
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+
+    char *json_buffer = (char *)malloc(file_size + 1);
+    fread(json_buffer, 1, file_size, file);
+    fclose(file);
+    json_buffer[file_size] = '\0';
+
+    cJSON *root = cJSON_Parse(json_buffer);
+    if (root == NULL) {
+        const char *error_ptr = cJSON_GetErrorPtr();
+        if (error_ptr != NULL) {
+            fprintf(stderr, "Erreur en analysant le JSON : %s\n", error_ptr);
+        }
+        free(json_buffer);
+        return;
+    }
+
+    cJSON *files_array = cJSON_GetObjectItem(root, "files");
+    cJSON *file_item;
+    cJSON_ArrayForEach(file_item, files_array) {
+        const char *filename = cJSON_GetStringValue(file_item);
+        if (filename != NULL) {
+            strcpy(files[num_files], filename);
+            num_files++;
+        }
+    }
+
+    free(json_buffer);
+    cJSON_Delete(root);
+
+    // Restreindre les permissions pour chaque fichier
+    for (int i = 0; i < num_files; i++) {
+        restrictPermissions(files[i]);
+    }
+}
+
+// Fonction pour créer le groupe "sensible" s'il n'existe pas déjà
+void createGroupIfNotExists(const char *group_name) {
+    struct group *grp;
+    if ((grp = getgrnam(group_name)) == NULL) {
+        if (errno == 0) {
+            // Le groupe n'existe pas, le créer
+            if (system("groupadd sensible") != 0) {
+                fprintf(stderr, "Erreur en créant le groupe %s : %s\n", group_name, strerror(errno));
+            } else {
+                printf("Groupe %s créé avec succès.\n", group_name);
+            }
+        } else {
+            fprintf(stderr, "Erreur en vérifiant si le groupe %s existe : %s\n", group_name, strerror(errno));
+        }
+    } else {
+        printf("Le groupe %s existe déjà.\n", group_name);
+    }
+}
+
+// Modifiez la signature de la fonction addUserToGroup pour prendre deux arguments
+void addUserToGroup(const char *group_name, const char *username) {
+    struct passwd *pwd;
+    if ((pwd = getpwnam(username)) == NULL) {
+        fprintf(stderr, "Erreur en récupérant l'utilisateur %s : %s\n", username, strerror(errno));
+        return;
+    }
+
+    if (getgrnam(group_name) == NULL) {
+        fprintf(stderr, "Le groupe %s n'existe pas.\n", group_name);
+        return;
+    }
+
+    char command[128];
+    sprintf(command, "usermod -a -G %s %s", group_name, username);
+    if (system(command) != 0) {
+        fprintf(stderr, "Erreur en ajoutant l'utilisateur %s au groupe %s : %s\n", username, group_name, strerror(errno));
+    } else {
+        printf("Utilisateur %s ajouté au groupe %s avec succès.\n", username, group_name);
+    }
+}
+
+
+// Fonction pour le menu Surveillance
+void surveillanceMenu() {
+    printf("Option Surveillance sélectionnée.\n");
+    surveiller_arborescence("."); // Surveillance de l'arborescence dans le répertoire courant
+}
+
+// Fonction pour le menu Ajout/suppression
+void ajoutSuppressionMenu() {
+    int choice;
+    do {
+        printf("\nMenu Ajout/suppression:\n");
+        printf("1. Ajouter un chemin\n");
+        printf("2. Supprimer un chemin\n");
+        printf("3. Retour au menu principal\n");
+        printf("Choix : ");
+        scanf("%d", &choice);
+
+        switch (choice) {
+            case 1:
+                printf("Option Ajouter un chemin sélectionnée.\n");
+                {
+                    char newFilePath[256];
+                    printf("Entrez le chemin du fichier à ajouter : ");
+                    scanf("%s", newFilePath);
+                    addFilePathToJson(newFilePath,JSON_FILE_PATH);
+                }
+                break;
+            case 2:
+                printf("Option Supprimer un chemin sélectionnée.\n");
+                // Demander à l'utilisateur le chemin à supprimer
+                char filePathToRemove[256];
+                printf("Entrez le chemin du fichier à supprimer : ");
+                scanf("%s", filePathToRemove);
+                removeFilePathFromJson(filePathToRemove, JSON_FILE_PATH);
+                break;
+            case 3:
+                printf("Retour au menu principal.\n");
+                break;
+            default:
+                printf("Choix invalide. Veuillez entrer un nombre entre 1 et 3.\n");
+        }
+    } while (choice != 3);
+}
+
+// Fonction pour le menu Droits
+void droitsMenu() {
+    printf("Option Droits sélectionnée.\n");
+
+    // Variables pour les autorisations
+    int choice;
+    char target_user[50];
+    printf("Entrez le nom de l'utilisateur à modifier : ");
+    scanf("%s", target_user);
+
+    // Lecture des autorisations depuis le fichier JSON pour l'utilisateur spécifié
+    int num_files;
+    FileAccessPermission *file_permissions = readPermissionsFromJSON(JSON_FILE_PATH, target_user, &num_files);
+    if (!file_permissions) {
+        printf("Impossible de lire les autorisations depuis le fichier JSON pour l'utilisateur %s.\n", target_user);
+        return;
+    }
+
+    // Menu pour changer les autorisations
+    do {
+        printf("\nMenu:\n");
+        printf("1. Voir les détails des fichiers\n");
+        printf("2. Changer les autorisations d'un fichier\n");
+        printf("3. Quitter\n");
+        printf("Choix : ");
+        scanf("%d", &choice);
+
+        switch (choice) {
+            case 1:
+                // Afficher à nouveau les détails des fichiers
+                displayDetailedFileInformation(target_user, file_permissions, num_files);
+                break;
+            case 2:
+                // Changer les autorisations d'un fichier
+                {
+                    char filename[256];
+                    printf("Entrez le nom du fichier pour lequel vous souhaitez changer les autorisations : ");
+                    scanf("%s", filename);
+                    changeFilePermissions(filename, target_user);
+                }
+                break;
+            case 3:
+                // Quitter le programme
+                printf("Au revoir !\n");
+                break;
+            default:
+                printf("Choix invalide. Veuillez entrer un nombre entre 1 et 3.\n");
+        }
+    } while (choice != 3);
+
+    // Libération de la mémoire
+    free(file_permissions);
+}
+
+
+// Fonction pour le menu Sécurité
+void securiteMenu() {
+    printf("Option Sécurité sélectionnée.\n");
+    char username[MAX_USERNAME_LEN]; // Déclaration de la variable username
+    int choice;
+    do {
+        printf("\nMenu Sécurité:\n");
+        printf("1. Ajouter fichier sensible\n");
+        printf("2. Retirer fichier sensible\n");
+        printf("3. Ajouter utilisateur au groupe sensible\n");
+        printf("4. Retour au menu principal\n");
+        printf("Choix : ");
+        scanf("%d", &choice);
+
+        switch (choice) {
+            case 1:
+                // Ajouter fichier sensible
+                {
+                    char newFilePath[256];
+                    printf("Entrez le chemin du nouveau fichier sensible : ");
+                    scanf("%s", newFilePath);
+                    addFilePathToJsonFichier_sensible(newFilePath, JSON_FILE_PATH2);
+                }
+                break;
+            case 2:
+                 // Retirer fichier sensible
+                {
+                    char filename[256];
+                    printf("Entrez le nom du fichier sensible à retirer : ");
+                    scanf("%s", filename);
+                    removeFilePathFromJsonFichier_sensible(filename);
+                }
+                break;
+             case 3:
+                 // Choisir l'utilisateur à ajouter au groupe sensible
+                printf("Entrez le nom de l'utilisateur à ajouter au groupe sensible : ");
+                scanf("%s", username);
+                // Ajouter utilisateur au groupe sensible avec le nom d'utilisateur choisi
+                addUserToGroup("sensible", username);
+                break;
+            case 4:
+                // Retour au menu principal
+                printf("Retour au menu principal.\n");
+                break;
+            default:
+                printf("Choix invalide. Veuillez entrer un nombre entre 1 et 3.\n");
+        }
+    } while (choice != 3);
+}
+
+
+int main() {
+
+        createJsonFichier_sensible();
     // Créer le fichier de journalisation de la surveillance
     creer_log_surveillance();
     // Créer le répertoire SecuOs s'il n'existe pas
     createSecuOsDirectory();
     // Créer le fichier JSON si nécessaire
     createJsonFileIfNeeded();
+    //restreindre les permissions des chemins dans le fichier Sensible
+    retrieveFilesAndRestrictPermissions();
+    //créer le groupe sensible
+    createGroupIfNotExists("sensible");
+    int choice;
+    do {
+        printf("\nMenu Principal:\n");
+        printf("1. Surveillance\n");
+        printf("2. Ajout/suppression\n");
+        printf("3. Droits\n");
+        printf("4. Sécurité\n");
+        printf("5. Quitter\n");
+        printf("Choix : ");
+        scanf("%d", &choice);
 
-    if (strcmp(argv[1], "add") == 0) {
-        // Ajouter un chemin au fichier JSON
-        if (argc < 3) {
-            printf("Utilisation : %s add <chemin>\n", argv[0]);
-            return 1;
+        switch (choice) {
+            case 1:
+                surveillanceMenu();
+                break;
+            case 2:
+                ajoutSuppressionMenu();
+                break;
+            case 3:
+                droitsMenu();
+                break;
+            case 4:
+                securiteMenu();
+                break;
+            case 5:
+                printf("Au revoir !\n");
+                break;
+            default:
+                printf("Choix invalide. Veuillez entrer un nombre entre 1 et 5.\n");
         }
-        addFilePathToJson(argv[2]);
-    } else if (strcmp(argv[1], "del") == 0) {
-        // Supprimer un chemin du fichier JSON// Vérifier si l'option "accès" a été spécifiée
-    } else if (strcmp(argv[1], "surveillance") == 0) {
-        // Activer la surveillance d'arborescence
-        surveiller_arborescence(".");
-    // Vérifier si l'option "acces" a été spécifiée
-    } else {
-        printf("Commande non reconnue.\n");
-        return 1;
-    }
+    } while (choice != 5);
 
-    return 0;
+        return 0;
+
 }
+
